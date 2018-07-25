@@ -15,23 +15,21 @@ namespace process_manager_test
 {
     public partial class MainForm : Form
     {
-        TextBox consoleOutput;
-        DirectoryInfo rustDir = new DirectoryInfo(@"C:\Users\Oliver\Desktop\process-manager-test-stuff\rust");
-        DirectoryInfo fivemDir = new DirectoryInfo(@"C:\Users\Oliver\Desktop\process-manager-test-stuff\fivem");
-        DirectoryInfo steamCmdDir = new DirectoryInfo(@"G:\steamcmd");
-        IDictionary<string, Process> processDict = new Dictionary<string, Process>();
+        private IDictionary<string, Process> processDict = new Dictionary<string, Process>();
+
+        private SynchronizationContext _syncContext;
+
+        // Form Methods
 
         public MainForm()
         {
-            processDict.Add("rustProcess", null);
-            processDict.Add("steamCmdProcess", null);
+            _syncContext = SynchronizationContext.Current;
             InitializeComponent();
-            consoleOutput = Controls.OfType<TextBox>().FirstOrDefault();
         }
 
         private void btnStart_Click(object sender, EventArgs e)
         {
-            Thread thread = new Thread(new ThreadStart(() => UpdateGame(rustDir.FullName, "258550")));
+            Thread thread = new Thread(new ThreadStart(() => UpdateGame(txtGameDirectory.Text, txtSteamAppId.Text)));
             thread.Start();
         }
 
@@ -42,92 +40,129 @@ namespace process_manager_test
 
         private void MainForm_FormClosing(object sender, FormClosingEventArgs e)
         {
+            KillAll(true, true);
+        }
+
+        private void btnClear_Click(object sender, EventArgs e)
+        {
+            txtConsoleOutput.Clear();
+        }
+
+        private void btnForceStop_Click(object sender, EventArgs e)
+        {
             KillAll(true);
         }
 
-        private bool? UpdateGame(string gameDir, string appId)
+        private void txtRustDirectory_DoubleClick(object sender, EventArgs e)
         {
-            if (processDict["steamCmdProcess"] != null)
+            using (FolderBrowserDialog fbd = new FolderBrowserDialog())
             {
-                return false;
-            }
+                DialogResult result = fbd.ShowDialog();
 
+                if (result == DialogResult.OK && !string.IsNullOrWhiteSpace(fbd.SelectedPath))
+                {
+                    txtGameDirectory.Text = fbd.SelectedPath;
+                }
+            }
+        }
+
+        private void txtSteamCMDDirectory_DoubleClick(object sender, EventArgs e)
+        {
+            using (FolderBrowserDialog fbd = new FolderBrowserDialog())
+            {
+                DialogResult result = fbd.ShowDialog();
+
+                if (result == DialogResult.OK && !string.IsNullOrWhiteSpace(fbd.SelectedPath))
+                {
+                    txtSteamCMDDirectory.Text = fbd.SelectedPath;
+                }
+            }
+        }
+
+        /********************************************************************************************************************/
+        // Other methods
+
+        private void UpdateGame(string gameDir, string appId)
+        {
             if (string.IsNullOrWhiteSpace(gameDir) || string.IsNullOrWhiteSpace(appId) || !Directory.Exists(gameDir))
             {
-                return null;
+                return;
             }
+
+            string dictId = $"{gameDir}:{appId}";
+
+            if (processDict.Where(k => k.Key == dictId).SingleOrDefault().Value != null)
+            {
+                return;
+            }
+
             try
             {
-                processDict["steamCmdProcess"] = new Process()
+                Process p = new Process()
                 {
                     StartInfo = new ProcessStartInfo()
                     {
-                        FileName = Path.Combine(steamCmdDir.FullName, "steamcmd.exe"),
-                        Arguments = string.Format(
-                            @"+login anonymous +force_install_dir {0} +app_update {1} +quit",
-                            gameDir,
-                            appId
-                            ),
+                        FileName = Path.Combine(txtSteamCMDDirectory.Text, "steamcmd.exe"),
+                        Arguments = $"+login anonymous +force_install_dir {gameDir} +app_update {appId} +quit",
                         UseShellExecute = false,
+                        CreateNoWindow = true,
                         RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    }
+                        RedirectStandardError = true,
+                        RedirectStandardInput = true
+                    },
+                    EnableRaisingEvents = true
                 };
-                processDict["steamCmdProcess"].Start();
-                AppendTextBox(consoleOutput, processDict["steamCmdProcess"].StartInfo.FileName + " " + processDict["steamCmdProcess"].StartInfo.Arguments + Environment.NewLine);
-                while (!processDict["steamCmdProcess"].StandardOutput.EndOfStream)
-                {
-                    AppendTextBox(consoleOutput, processDict["steamCmdProcess"].StandardOutput.ReadLine() + Environment.NewLine);
-                }
 
-                if (!processDict["steamCmdProcess"].HasExited)
-                {
-                    processDict["steamCmdProcess"].Kill();
-                }
-                processDict["steamCmdProcess"] = null;
-                return true;
+                processDict[dictId] = p;
+
+                p.OutputDataReceived += (sender, args) => AppendTextBox(txtConsoleOutput, args.Data);
+                p.ErrorDataReceived += (sender, args) => AppendTextBox(txtConsoleOutput, args.Data);
+
+                AppendTextBox(txtConsoleOutput, $"{p.StartInfo.FileName} {p.StartInfo.Arguments}");
+
+                p.Start();
+
+                p.BeginOutputReadLine();
+                p.BeginErrorReadLine();
+
+                p.WaitForExit();
+
+                processDict.Remove(dictId);
+                return;
             }
             catch (Exception ex)
             {
                 MessageBox.Show(ex.Message + " : " + ex.StackTrace);
-                return null;
+                return;
             }
         }
 
         private void AppendTextBox(TextBox textBox, string value)
         {
-            if (InvokeRequired)
+            if (value != null)
             {
-                Invoke(new Action<TextBox, string>(AppendTextBox), new object[] { textBox, value });
-                return;
+                _syncContext.Post(_ => textBox.AppendText($"{value} {Environment.NewLine}"), null);
             }
-            textBox?.AppendText(value);
         }
 
-        private void KillAll(bool silent = false)
+        private void KillAll(bool force = false, bool silent = false)
         {
-            bool killedAProcess = false;
             foreach (KeyValuePair<string, Process> entry in processDict)
             {
                 if (entry.Value != null && !entry.Value.HasExited)
                 {
-                    entry.Value.Kill();
-                    killedAProcess = true;
+                    if (force)
+                    {
+                        entry.Value.Kill();
+                    }
+                    else
+                    {
+                        entry.Value.StandardInput.Close();
+                    }
+                    if (!silent) {
+                        AppendTextBox(txtConsoleOutput, force ? $"Process {entry.Value.Id} : {entry.Key} killed!" : $"Command sent to close process {entry.Value.Id} : {entry.Key}");
+                    }
                 }
-            }
-
-            if (!silent)
-            {
-                string output = string.Empty;
-                if (killedAProcess)
-                {
-                    output = "Killed all running processes!";
-                }
-                else
-                {
-                    output = "There are no running processes!";
-                }
-                consoleOutput.AppendText(output + Environment.NewLine);
             }
         }
     }
